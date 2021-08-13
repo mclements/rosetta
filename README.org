@@ -1,0 +1,15 @@
+#+title: Rosetta Code: Multiple implementations of more complex applications
+#+author: Mark Clements and colleagues
+
+The excellent web site https://rosettacode.org contains moderately simple exercises written in many different languages. This is an excellent way to investigate how different languages can implement the same algorithm.
+
+However, the examples are typically small. The intention for this package is to implement a series of larger examples. The current examples include:
+
+- [[file:hta/README.org][A discrete event simulation for health technology assessment]]
+- A cyclic Markov model
+
+Proposed examples include:
+
+- Fisher's exact test
+- A foreign function interface for the C math library
+- A foreign function interface for the R math library
