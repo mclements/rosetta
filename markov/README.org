@@ -1,0 +1,900 @@
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="https://fniessen.github.io/org-html-themes/src/readtheorg_theme/css/htmlize.css"/>
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="https://fniessen.github.io/org-html-themes/src/readtheorg_theme/css/readtheorg.css"/>
+
+#+title: Discrete time cyclic Markov models
+#+author: Mark Clements
+
+# +options: toc:nil html-postamble:nil
+
+* Task description 
+
+As a test example, consider a cyclic, discrete time, two-state Markov model with states =a= and =b=, with the one-step probabilities of moving from =a->b= and =b->a= of 0.125 and 0.25, respectively, with a probability of 1 for being in state =a= at time 0. How can we calculate the state probabilities at times 1 through 5?
+
+Note that this essentially a trivial calculation. Our interest is in how to implement this simple example in different languages and then consider various extensions.
+
+
+Extensions that may of interest include:
+
+- Incorporate time into the transition probabilities
+- Incorporate time in state
+- Incorporate covariates
+- Sum for life expectancy
+- Sum for discounted costs and quality-adjusted life-years
+
+# - [[file:datalog.org][Datalog]]
+# - [[file:mercury.org][Mercury]]
+# - [[file:prolog.org][Prolog]]
+
+* Datalog
+** Simple implementation using all transition paths
+
+Using Souffle with a list type for the paths:
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_1.dl :exports code :eval no
+.decl times(time:number)
+times(time) :- time = range(0, 5).
+
+.decl chance(from: symbol, to: symbol, p: float)
+chance("A", "A", 0.875).
+chance("A", "B", 0.125).
+chance("B", "B", 0.75).
+chance("B", "A", 0.25).
+
+.type PathId = [first: symbol, rest: PathId]
+
+.decl transition(id:PathId, sfrom: symbol, sto: symbol, tfrom: number, p: float)
+
+transition([Sto,[Sfrom,nil]], Sfrom, Sto, 0, P) :-
+     Sfrom = "A",
+     chance(Sfrom, Sto, P).
+
+transition([Sto,Id], Sfrom, Sto, Tfrom, Pfrom*Pchance) :-
+    times(Tfrom),
+    transition(Id, _,Sfrom,Tfrom-1,Pfrom),
+    chance(Sfrom, Sto, Pchance).
+
+.decl test(time:number, n:number, total:float)
+test(time, n, total) :-
+     times(time),
+     total = sum P : {transition(_,_,_,time,P)},
+     n = count: {transition(_,_,_,time,_)}.
+.output test
+
+.decl test2(time:number, state:symbol, n:number, total:float)
+test2(time, state, n, total) :-
+     times(time),
+     chance(state, _, _),
+     total = sum P : {transition(_,state,_,time,P)},
+     n = count : {transition(_,state,_,time,_)}.
+.output test2
+#+END_SRC
+
+We can run this code using:
+
+#+BEGIN_SRC sh :results output :exports both
+souffle -D- markov_1.dl
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+---------------
+test
+time	n	total
+===============
+0	2	1
+1	4	1
+2	8	1
+3	16	1
+4	32	1
+===============
+---------------
+test2
+time	state	n	total
+===============
+0	A	2	1
+0	B	0	0
+1	A	2	0.875
+1	B	2	0.125
+2	A	4	0.796875
+2	B	4	0.203125
+3	A	8	0.748046875
+3	B	8	0.251953125
+4	A	16	0.717529296875
+4	B	16	0.282470703125
+===============
+#+end_example
+
+Note that the number of transitions doubles for each time increment, which quickly leads to a state space explosion. In practice, the implementation can only expand to approximately 22 time steps.
+
+
+** Collapse transitions by time and state
+
+It would be useful to avoid the state space explosion by aggregating previous transitions. However, for this case, Souffle does not allow for an aggregation of previous transitions within the transition predicate, raising a compile-time error on cyclic aggregation. To address this issue, we can write mutually recursive predicates to sum over the number of transitions: 
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_2.dl :exports code :eval no
+.decl times(time:number)
+times(time) :- time = range(0, 6).
+
+.decl chance(from:symbol, to:symbol, p:float)
+chance("A", "A", 0.875).
+chance("A", "B", 0.125).
+chance("B", "B", 0.75).
+chance("B", "A", 0.25).
+
+.decl ntransto(state:symbol, n:number)
+.decl pstart(i:number, state:symbol, time:number, p:float)
+.decl transition(sfrom:symbol, sto:symbol, tfrom:number, p:float)
+ntransto(state,n) :- chance(_,state,_), n = count : { chance(_,state,_) }.
+pstart(nt, state, 0, 1.0) :- state = "A", ntransto(state,nt). 
+pstart(nt, state, 0, 0.0) :- state = "B", ntransto(state,nt). 
+pstart(1, state, time, p) :-
+    times(time), time > 0, 
+    transition(state, state, time-1, p). // *previous* time; requires that state->state exists
+pstart(i+1, state, time, pold+pnew) :-
+    times(time), time>0, 
+    ntransto(state,nt), i = range(1,nt), // iterate over times
+    pstart(i, state, time, pold), 
+    transition(sfrom, state, time-1, pnew), // *previous* time
+    sfrom != state. 
+
+transition(Sfrom, Sto, Tfrom, Pfrom*Pchance) :-
+    times(Tfrom), 
+    chance(Sfrom, Sto, Pchance),
+    ntransto(Sfrom,Nt),
+    pstart(Nt,Sfrom,Tfrom,Pfrom).
+
+.decl test(time:number, n:number, total:float)
+test(time, n, total) :-
+     times(time),
+     total = sum P : {transition(_,_,time,P)},
+     n = count : {transition(_,_,time,_)}.
+.output test
+
+.decl test2(time:number, state:symbol, n:number, total:float)
+test2(time, state, n, total) :-
+     times(time),
+     chance(state, _, _),
+     total = sum P : {transition(state,_,time,P)},
+     n = count : {transition(state,_,time,_)}.
+.output test2
+#+END_SRC
+
+#+BEGIN_SRC sh :results output :exports both
+souffle -D- markov_2.dl
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+---------------
+test
+time	n	total
+===============
+0	4	1
+1	4	1
+2	4	1
+3	4	1
+4	4	1
+5	4	1
+===============
+---------------
+test2
+time	state	n	total
+===============
+0	A	2	1
+0	B	2	0
+1	A	2	0.875
+1	B	2	0.125
+2	A	2	0.796875
+2	B	2	0.203125
+3	A	2	0.748046875
+3	B	2	0.251953125
+4	A	2	0.717529296875
+4	B	2	0.282470703125
+5	A	2	0.698455810546875
+5	B	2	0.301544189453125
+===============
+#+end_example
+
+This code can be expanded to thousands of steps. Note that the recursive predicates were initially implemented in Souffle and then converted to Mercury and Prolog. The Souffle Datalog implementation was faster to write from scratch than it was to convert to the other languages, suggesting that Datalog was easier to use in this particular case.
+
+* Mercury
+** Simple implementation using all transition paths
+
+The following example uses tabling. As a reminder, Mercury needs to be configured with =./configure --enable-mm-grades=. Then the application code is:
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_1.m :exports code :eval no
+:- module markov_1.
+
+:- interface.
+:- import_module io.
+:- pred main(io::di, io::uo) is det.
+
+:- implementation.
+:- import_module ranges, list, int, float, solutions.
+
+:- pred times(int::out) is nondet.
+times(Time) :-
+    R = range(0, 5),
+    nondet_member(Time, R).
+
+:- type states ---> a ; b.
+
+:- pred chance(states::out, states::out, float::out) is multi.
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+%% Utilities
+:- pred bag_count(pred(T)::(pred(out) is nondet), int::out) is det.
+:- pred bag_sum(pred(float)::(pred(out) is nondet), float::out) is det.
+bag_count(Predicate, Count) :-
+    promise_equivalent_solutions[Count] (
+	unsorted_aggregate(Predicate,
+			   (pred(_X::in,Y::in,Z::out) is det :- Z is Y+1),
+			   0, Count)).
+bag_sum(Predicate, Sum) :-
+    promise_equivalent_solutions[Sum] (
+	unsorted_aggregate(Predicate,
+			   (pred(X::in,Y::in,Z::out) is det :- Z is X+Y),
+			   0.0, Sum)).
+
+:- type path_id == list(states).
+
+:- pred transition(path_id::out, states::out, states::out, int::out, float::out) is nondet.
+:- pragma minimal_model(transition/5).
+transition(Id, Sfrom, Sto, Time, P) :-
+    (Time = 0, Sfrom = a, chance(Sfrom, Sto, P), Id = [Sto,Sfrom] ;
+     times(Time), Time>0, transition(Id0, _,Sfrom,Time-1,Pfrom),
+     chance(Sfrom, Sto, Pchance), Id = [Sto|Id0], P is Pfrom*Pchance).
+
+main(!IO) :-
+    io.write_string("{Time,Ntransitions,Ptotal}:\n",!IO),
+    solutions((pred({Time,N,P}::out) is nondet :-
+		   times(Time),
+		   Ps = (pred(Pi::out) is nondet :- transition(_,_,_,Time,Pi)),
+		   bag_sum(Ps, P),
+		   bag_count(Ps, N)),
+	      Solutions),
+    foldl(io.write_line, Solutions, !IO),
+    io.write_string("{Time,State,Ptotal}:\n",!IO),
+    solutions((pred({Time,State,P}::out) is nondet :-
+		   times(Time), chance(State,_,_),
+		   bag_sum((pred(Pi::out) is nondet :- transition(_,State,_,Time,Pi)), P)),
+	      Solutions2),
+    foldl(io.write_line, Solutions2, !IO).
+#+END_SRC
+
+We can run this code using:
+
+#+BEGIN_SRC sh :results output :exports both :eval no
+mmc --make --use-minimal-model-stack-copy markov_1 && ./markov_1
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+{Time,Ntransitions,Ptotal}:
+{0, 2, 1.0}
+{1, 4, 1.0}
+{2, 8, 1.0}
+{3, 16, 1.0}
+{4, 32, 1.0}
+{5, 64, 1.0}
+{Time,State,Ptotal}:
+{0, a, 1.0}
+{0, b, 0.0}
+{1, a, 0.875}
+{1, b, 0.125}
+{2, a, 0.796875}
+{2, b, 0.203125}
+{3, a, 0.748046875}
+{3, b, 0.251953125}
+{4, a, 0.717529296875}
+{4, b, 0.282470703125}
+{5, a, 0.698455810546875}
+{5, b, 0.301544189453125}
+#+end_example
+
+
+Note that the number of transitions doubles for each time increment, which quickly leads to a state space explosion. In practice, the implementation can only expand to approximately 12 time steps.
+
+** Collapse transitions by time and state
+
+The main change is that the definition of the =transition= predicate, with an aggregate predicate and we have dropped the =Id=.
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_2.m :exports code :eval no
+:- module markov_2.
+
+:- interface.
+:- import_module io.
+:- pred main(io::di, io::uo) is det.
+
+:- implementation.
+:- import_module ranges, list, int, float, solutions, pair.
+
+:- pred times(int::out) is nondet.
+times(Time) :-
+    R = range(0, 5),
+    nondet_member(Time, R).
+
+:- type states ---> a ; b.
+
+:- pred chance(states, states, float).
+:- mode chance(out, out, out) is multi.
+:- mode chance(in, in, out) is det.
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+:- pred pinit(states, float).
+:- mode pinit(in, out) is det.
+:- mode pinit(out, out) is multi.
+pinit(a, 1.0).
+pinit(b, 0.0).
+
+:- pred bag_count(pred(T)::(pred(out) is nondet), int::out) is det.
+:- pred bag_sum(pred(float)::(pred(out) is nondet), float::out) is det.
+bag_count(Predicate, Count) :-
+    promise_equivalent_solutions[Count] (
+	unsorted_aggregate(Predicate,
+			   (pred(_X::in,Y::in,Z::out) is det :- Z is Y+1),
+			   0, Count)).
+bag_sum(Predicate, Sum) :-
+    promise_equivalent_solutions[Sum] (
+	unsorted_aggregate(Predicate,
+			   (pred(X::in,Y::in,Z::out) is det :- Z is X+Y),
+			   0.0, Sum)).
+
+:- pred transition(states, states, int, float).
+:- mode transition(out, out, out, out) is nondet.
+:- mode transition(out, in, in, out) is nondet.
+:- pragma minimal_model(transition/4).
+transition(Sfrom, Sto, Time, Pchance*Pfrom) :-
+    times(Time),
+    chance(Sfrom, Sto, Pchance),
+    (Time = 0, pinit(Sfrom,Pfrom)
+    ;
+    Time>0,
+    Ps = (pred(Pi::out) is nondet :- transition(_,Sfrom,Time-1,Pi)),
+    bag_sum(Ps, Pfrom)).
+
+main(!IO) :-
+    io.write_string("{Time,Ntransitions,Ptotal}:\n",!IO),
+    solutions((pred({Time,N,P}::out) is nondet :-
+		   times(Time),
+		   Ps = (pred(Pi::out) is nondet :- transition(_,_,Time,Pi)),
+		   bag_sum(Ps,P),
+		   bag_count(Ps, N)),
+	      Solutions),
+    foldl(io.write_line, Solutions, !IO),
+    io.write_string("{Time,State,Ntransitions,Ptotal}:\n",!IO),
+    solutions((pred({Time,State,N,P}::out) is nondet :-
+		   times(Time),
+		   chance(State,_,_),
+		   Ps = (pred(Pi::out) is nondet :- transition(State,_,Time,Pi)),
+		   bag_count(Ps,N),
+		   bag_sum(Ps, P)),
+	      Solutions2), 
+    foldl(io.write_line, Solutions2, !IO).
+#+END_SRC
+
+When we run this code:
+
+#+BEGIN_SRC sh :results raw :exports code
+mmc --make --use-minimal-model-stack-copy markov_2 && ./markov_2
+#+END_SRC
+
+#+RESULTS:
+{Time,Ntransitions,Ptotal}:
+{0, 4, 1.0}
+{1, 4, 1.0}
+{2, 4, 1.0}
+{3, 4, 1.0}
+{4, 4, 1.0}
+{5, 4, 1.0}
+{Time,State,Ntransitions,Ptotal}:
+{0, a, 2, 1.0}
+{0, b, 2, 0.0}
+{1, a, 2, 0.875}
+{1, b, 2, 0.125}
+{2, a, 2, 0.796875}
+{2, b, 2, 0.203125}
+{3, a, 2, 0.748046875}
+{3, b, 2, 0.251953125}
+{4, a, 2, 0.717529296875}
+{4, b, 2, 0.282470703125}
+{5, a, 2, 0.698455810546875}
+{5, b, 2, 0.301544189453125}
+
+
+*** Implementation using mutually recursive predicates
+
+We could also adapt Datalog's mutually recursive predicates solution for Mercury -- although this is not necessary for this example.
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_3.m :exports code :eval no
+:- module markov_3.
+
+:- interface.
+:- import_module io.
+:- pred main(io::di, io::uo) is det.
+
+:- implementation.
+:- import_module ranges, list, int, float, solutions.
+
+%% Model specification
+:- pred markov_model(int).
+:- mode markov_model(in) is semidet.
+:- mode markov_model(out) is det.
+:- pred pinit(states, float).
+:- mode pinit(out, out) is multi.
+:- mode pinit(in, out) is det.
+:- pred chance(states, states, float).
+:- mode chance(out, out, out) is multi.
+:- mode chance(in, in, out) is semidet.
+:- mode chance(in, in, in) is semidet.
+
+markov_model(5). % five cycles
+
+:- type states ---> a ; b. % two states
+
+pinit(a, 1.0). % all individuals assumed to start in state a
+pinit(b, 0.0).
+
+chance(a, a, 0.875). chance(a, b, 0.125).
+chance(b, a, 0.25). chance(b, b, 0.75). 
+
+%% Utilities
+:- pred bag_count(pred(T)::(pred(out) is nondet), int::out) is det.
+:- pred bag_sum(pred(float)::(pred(out) is nondet), float::out) is det.
+bag_count(Predicate, Count) :-
+    promise_equivalent_solutions[Count] (
+	unsorted_aggregate(Predicate,
+			   (pred(_X::in,Y::in,Z::out) is det :- Z is Y+1),
+			   0, Count)).
+bag_sum(Predicate, Sum) :-
+    promise_equivalent_solutions[Sum] (
+	unsorted_aggregate(Predicate,
+			   (pred(X::in,Y::in,Z::out) is det :- Z is X+Y),
+			   0.0, Sum)).
+
+%% Model implementation
+
+%%% Times
+:- pred times(int).
+:- mode times(out) is nondet.
+:- mode times(in) is semidet.
+times(Time) :- markov_model(N), R = range(0, N), nondet_member(Time, R).
+
+%%% Number of transitions
+:- pred ntransto(states, int).
+:- mode ntransto(in, out) is nondet.
+:- mode ntransto(out, out) is nondet.
+:- pragma minimal_model(ntransto/2).
+ntransto(State, N) :-
+    chance(_, State, _),
+    bag_count((pred(Pi::out) is nondet :- chance(_,State,Pi)), N).
+
+%%% Primary mutually recursive predicates: pstart and transition
+:- pred pstart(int, states, int, float).
+:- mode pstart(out,out,out,out) is nondet. % show values
+:- mode pstart(in,in,in,out) is nondet.    % transition
+:- pragma minimal_model(pstart/4).
+%% pstart iterates over the number of transitions
+pstart(I, State, Time, P) :-
+    (Time = 0, ntransto(State,I), pinit(State,P) ;
+     I = 1, times(Time), Time > 0, transition(State, State, Time-1, P) ;
+     times(Time), Time > 0,
+     ntransto(State, Nth), I>1, I =< Nth,
+     pstart(I-1, State, Time, Pold),
+     transition(Sfrom, State, Time-1, Pnew), Sfrom \= State,
+     P is Pold+Pnew).
+
+:- pred transition(states, states, int, float).
+:- mode transition(out, out, out, out) is nondet. % show values
+:- mode transition(out, out, in, out) is nondet. % pstart (second case)
+:- mode transition(out, in, in, out) is nondet. % pstart (third case)
+:- pragma minimal_model(transition/4).
+%% transition is defined by chance and the nth pstart
+transition(Sfrom, Sto, Time, Pfrom*Pchance) :-
+    times(Time),
+    chance(Sfrom, Sto, Pchance),
+    ntransto(Sfrom,Nth),
+    pstart(Nth,Sfrom,Time,Pfrom).
+
+main(!IO) :-
+    io.write_string("{Time,Ntransitions,Ptotal}:\n", !IO),
+    Agg = (pred({Time,N,Ptotal}::out) is nondet :-
+	       times(Time),
+    	       Ps = (pred(P::out) is nondet :- transition(_,_,Time,P)),
+    	       bag_sum(Ps, Ptotal),
+	       bag_count(Ps,N)),
+    solutions(Agg, Solutions),
+    foldl(io.write_line, Solutions, !IO),
+    io.write_string("{Time,State,Ptotal}:\n", !IO),
+    Agg2 = (pred({Time,Sfrom,Ptotal}::out) is nondet :-
+		 times(Time), chance(Sfrom,_,_),
+		 Ps = (pred(P::out) is nondet :- transition(Sfrom,_,Time,P)),
+    		 bag_sum(Ps, Ptotal)),
+    solutions(Agg2, Solutions2),
+    foldl(io.write_line, Solutions2, !IO).
+#+END_SRC
+
+#+BEGIN_SRC sh :results output :exports both
+mmc --make --use-minimal-model-stack-copy markov_3 && ./markov_3
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+{Time,Ntransitions,Ptotal}:
+{0, 4, 1.0}
+{1, 4, 1.0}
+{2, 4, 1.0}
+{3, 4, 1.0}
+{4, 4, 1.0}
+{5, 4, 1.0}
+{Time,State,Ptotal}:
+{0, a, 1.0}
+{0, b, 0.0}
+{1, a, 0.875}
+{1, b, 0.125}
+{2, a, 0.796875}
+{2, b, 0.203125}
+{3, a, 0.748046875}
+{3, b, 0.251953125}
+{4, a, 0.717529296875}
+{4, b, 0.282470703125}
+{5, a, 0.698455810546875}
+{5, b, 0.301544189453125}
+#+end_example
+
+This code can be expanded to thousands of steps.
+
+* Prolog
+** Simple implementation using all transition paths
+
+The following example uses tabling:
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_1.pl :exports code :eval no
+times(Time) :- between(0, 5, Time).
+
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+:- table(transition/5).
+transition(Id, State, Sto, Time, P) :-
+    (Time = 0, State = a, chance(State, Sto, P), Id = [Sto,State] ;
+     times(Time), Time>0, Tprev is Time-1, transition(Id0, _,State,Tprev,Pfrom),
+     chance(State, Sto, Pchance), Id = [Sto|Id0], P is Pfrom*Pchance).
+
+test :-
+    aggregate(r(count,sum(P)), Id^State^Sto^(transition(Id,State,Sto,Time,P)),
+	      r(N,Total)),
+    writeln(test(Time,N,Total)), fail.
+test2 :-
+    aggregate(r(count,sum(P)), Id^Sto^(transition(Id,State,Sto,Time,P)),
+	      r(N,Total)),
+    writeln(test2(Time,State,N,Total)), fail.
+
+?- test; test2; true.
+#+END_SRC
+
+We can run this code using:
+
+#+BEGIN_SRC sh :results output :exports both
+swipl -s markov_1.pl
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+test(0,2,1.0)
+test(1,4,1.0)
+test(2,8,1.0)
+test(3,16,1.0)
+test(4,32,1.0)
+test(5,64,1.0)
+test2(0,a,2,1.0)
+test2(1,a,2,0.875)
+test2(2,a,4,0.796875)
+test2(3,a,8,0.748046875)
+test2(4,a,16,0.717529296875)
+test2(5,a,32,0.698455810546875)
+test2(1,b,2,0.125)
+test2(2,b,4,0.203125)
+test2(3,b,8,0.251953125)
+test2(4,b,16,0.282470703125)
+test2(5,b,32,0.301544189453125)
+
+#+end_example
+
+Note that the number of transitions doubles for each time increment, which quickly leads to a state space explosion. In practice, the implementation can only expand to approximately 18 time steps.
+
+Further, note that an acyclic model would only have a linear increase in state space.
+
+** Collapse transitions by time and state (ISO)
+
+Using Prologs with tabling and mutually recursive predicates (tested on Ciao, SWI-Prolog, XSB and YAP):
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_2.pl :exports code :eval no
+%% %% XSB
+%% :- import between/3, length/2 from basics.
+
+%% %% Ciao:
+%% :- module(test_markov, [test/0,test2/0]).
+%% :- use_package(tabling).
+%% :- use_module(library(aggregates)).
+%% writeln(Term) :- write_term(Term, []), nl.
+
+times(Time) :- between(0, 5, Time).
+
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+:- table(pstart/4).
+:- table(transition/4).
+
+sum([],0.0).
+sum([X|Y],Sum) :- sum(Y,SumY), Sum is X+SumY.
+
+ntransto(State,N) :- bagof(Sto, P^chance(State,Sto,P), List),
+		     length(List,N).
+pstart(2, a, 0, 1.0).
+pstart(2, b, 0, 0.0).
+pstart(1, State, Time, P) :- times(Time), Time > 0,
+			     chance(State,_,_),
+			     Tprev is Time-1,
+			     transition(State, State, Tprev, P).
+pstart(I,State,Time,P) :-
+    times(Time), Time > 0,
+    ntransto(State,Nth), between(2,Nth,I),
+    Iprev is I-1,
+    chance(Sfrom,State,_),
+    pstart(Iprev,State,Time,Pold),
+    Tprev is Time-1,
+    transition(Sfrom,State,Tprev,Pnew), Sfrom \= State,
+    P is Pold+Pnew.
+
+transition(Sfrom, Sto, Time, P) :-
+    times(Time), 
+    chance(Sfrom,Sto,Pchance),
+    ntransto(Sfrom,Nth),
+    pstart(Nth,Sfrom,Time,Pfrom),
+    P is Pchance*Pfrom.
+
+test :-
+    bagof(P, State^Sto^transition(State,Sto,Time,P), List),
+    length(List, N),
+    sum(List,Total),
+    writeln(test(Time,N,Total)), fail.
+test2 :-
+    bagof(P, Sto^transition(State,Sto,Time,P), List),
+    length(List, N),
+    sum(List,Total),
+    writeln(test2(Time,State,N,Total)), fail.
+
+?- test; test2; true. % comment out for Ciao
+#+end_src
+
+#+BEGIN_SRC sh :results output :exports both
+swipl -s markov_2.pl
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+test(0,4,1.0)
+test(1,4,1.0)
+test(2,4,1.0)
+test(3,4,1.0)
+test(4,4,1.0)
+test(5,4,1.0)
+test2(0,a,2,1.0)
+test2(1,a,2,0.875)
+test2(2,a,2,0.796875)
+test2(3,a,2,0.748046875)
+test2(4,a,2,0.717529296875)
+test2(5,a,2,0.698455810546875)
+test2(0,b,2,0.0)
+test2(1,b,2,0.125)
+test2(2,b,2,0.203125)
+test2(3,b,2,0.251953125)
+test2(4,b,2,0.282470703125)
+test2(5,b,2,0.301544189453125)
+
+#+end_example
+
+** Collapse transitions by time and state (table-directed modes)
+
+*** SWI-Prolog
+
+For SWI-Prolog, we can use a =sum= mode for tabling:
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_3.pl :exports code :eval no
+times(Time) :- between(0, 5, Time).
+
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+:- table transition(_,_,_,sum).
+
+transition(Sfrom, Sto, 0, P) :-
+    Sfrom = a,
+    chance(Sfrom, Sto, P).
+
+transition(Sfrom, Sto, Time, P) :-
+    times(Time), Time>0, Tprev is Time-1,
+    transition(_,Sfrom,Tprev,Pfrom),
+    chance(Sfrom, Sto, Pchance),
+    P is Pfrom*Pchance.
+
+test :-
+    aggregate(r(count,sum(P)), Sfrom^Sto^(transition(Sfrom,Sto,Time,P)),
+	      r(N,Total)),
+    writeln(test(Time,N,Total)), fail.
+
+test2 :-
+    aggregate(r(count,sum(P)), Sto^(transition(Sfrom,Sto,Time,P)), r(N, Total)),
+    writeln(test2(Time,Sfrom,N,Total)), fail.
+
+?- test; test2; true.
+#+END_SRC
+
+#+BEGIN_SRC sh :results output :exports both
+  swipl -s markov_3.pl
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+test(0,2,1.0)
+test(1,4,1.0)
+test(2,4,1.0)
+test(3,4,1.0)
+test(4,4,1.0)
+test(5,4,1.0)
+test2(0,a,2,1.0)
+test2(1,a,2,0.875)
+test2(2,a,2,0.796875)
+test2(3,a,2,0.748046875)
+test2(4,a,2,0.717529296875)
+test2(5,a,2,0.698455810546875)
+test2(1,b,2,0.125)
+test2(2,b,2,0.203125)
+test2(3,b,2,0.251953125)
+test2(4,b,2,0.282470703125)
+test2(5,b,2,0.301544189453125)
+#+end_example
+
+This code can be expanded to thousands of steps.
+
+*** XSB
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_3_xsb.pl :exports code :eval no
+times(Time) :- basics:between(0, 5, Time).
+
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+summing(X,Y,Z) :- Z is X+Y.
+:- table transition(_,_,_,lattice(summing/3)).
+
+transition(Sfrom, Sto, 0, P) :-
+    Sfrom = a,
+    chance(Sfrom, Sto, P).
+
+transition(Sfrom, Sto, Time, P) :-
+    times(Time), Time>0, Tprev is Time-1,
+    transition(_,Sfrom,Tprev,Pfrom),
+    chance(Sfrom, Sto, Pchance),
+    P is Pfrom*Pchance.
+
+stateProb(State)(Time)(P) :- Tprev is Time-1, transition(_,State,Tprev,P).
+probsByAll(State)(Time)(P) :- transition(State,_,Time,P).
+probsByTime(Time)(P) :- transition(_,_,Time,P).
+:- hilog sum.
+sum(X,Y,Z) :- Z is X+Y.
+:- hilog successor.
+successor(X,_Y,Z) :- Z is X+1.
+
+?- aggregs:bagCount(probsByTime(Time), N),
+   aggregs:bagSum(probsByTime(Time), Total),
+   writeln(test(Time,N,Total)), fail.
+?- aggregs:bagCount(probsByAll(Time)(State), N),
+   aggregs:bagSum(probsByAll(Time)(State), Total),
+   writeln(test2(Time,State,N,Total)), fail.
+#+END_SRC
+
+#+BEGIN_SRC sh :results output :exports both
+  xsb  --nobanner --quietload markov_3_xsb
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+test(0,2,1.0)
+test(1,4,1.0)
+test(2,4,1.0)
+test(3,4,1.0)
+test(4,4,1.0)
+test(5,4,1.0)
+test2(a,0,2,1.0)
+test2(a,1,2,0.875)
+test2(a,2,2,0.796875)
+test2(a,3,2,0.748046875)
+test2(a,4,2,0.717529296875)
+test2(a,5,2,0.698455810546875)
+test2(b,1,2,0.125)
+test2(b,2,2,0.203125)
+test2(b,3,2,0.251953125)
+test2(b,4,2,0.282470703125)
+test2(b,5,2,0.301544189453125)
+#+end_example
+
+
+** Collapse transitions by time and state (aggregates within the tabled predicates)
+
+For XSB, we can also use aggregates directly within the tabled predicates:
+
+#+BEGIN_SRC prolog :noweb yes :tangle markov_4.pl :exports code :eval no
+times(Time) :- basics:between(0, 5, Time).
+
+chance(a, a, 0.875).
+chance(a, b, 0.125).
+chance(b, b, 0.75).
+chance(b, a, 0.25).
+
+:- table transition/4.
+transition(Sfrom, Sto, 0, P) :-
+    Sfrom = a, chance(Sfrom, Sto, P).
+
+transition(Sfrom, Sto, Time, P) :-
+    times(Time), Time > 0, 
+    aggregs:bagSum(stateProb(Sfrom)(Time),Pfrom), %% aggregation within tabling
+    chance(Sfrom, Sto, Pchance),
+    P is Pfrom*Pchance.
+
+stateProb(State)(Time)(P) :- Tprev is Time-1, transition(_,State,Tprev,P).
+probsByAll(State)(Time)(P) :- transition(State,_,Time,P).
+probsByTime(Time)(P) :- transition(_,_,Time,P).
+:- hilog sum.
+sum(X,Y,Z) :- Z is X+Y.
+:- hilog successor.
+successor(X,_Y,Z) :- Z is X+1.
+
+?- aggregs:bagCount(probsByTime(Time), N),
+   aggregs:bagSum(probsByTime(Time), Total),
+   writeln(test(Time,N,Total)), fail.
+?- aggregs:bagCount(probsByAll(Time)(State), N),
+   aggregs:bagSum(probsByAll(Time)(State), Total),
+   writeln(test2(Time,State,N,Total)), fail.
+#+END_SRC
+
+#+BEGIN_SRC sh :results output :exports both
+  xsb --nobanner --quietload markov_4
+#+END_SRC
+
+#+RESULTS:
+#+begin_example
+test(0,2,1.0)
+test(1,4,1.0)
+test(2,4,1.0)
+test(3,4,1.0)
+test(4,4,1.0)
+test(5,4,1.0)
+test2(a,0,2,1.0)
+test2(a,1,2,0.875)
+test2(a,2,2,0.796875)
+test2(a,3,2,0.748046875)
+test2(a,4,2,0.717529296875)
+test2(a,5,2,0.698455810546875)
+test2(b,1,2,0.125)
+test2(b,2,2,0.203125)
+test2(b,3,2,0.251953125)
+test2(b,4,2,0.282470703125)
+test2(b,5,2,0.301544189453125)
+#+end_example
