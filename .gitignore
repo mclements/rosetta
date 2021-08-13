@@ -1,0 +1,15 @@
+*~
+*.m
+*.mh
+*.err
+rosetta_*
+*.html
+markov/Mercury/*
+markov_*.*
+markov_*
+*.po
+*.pl
+*.itf
+markov/datalog.org
+markov/mercury.org
+markov/prolog.org
