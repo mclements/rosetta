@@ -1,0 +1,211 @@
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="https://fniessen.github.io/org-html-themes/src/readtheorg_theme/css/htmlize.css"/>
+#+HTML_HEAD: <link rel="stylesheet" type="text/css" href="https://fniessen.github.io/org-html-themes/src/readtheorg_theme/css/readtheorg.css"/>
+
+#+title: Merge and aggregate datasets
+#+author: Mark Clements
+
+# +options: toc:nil html-postamble:nil
+
+* Task description 
+
+See https://rosettacode.org/wiki/Merge_and_aggregate_datasets.
+
+I have contributed the [[https://rosettacode.org/wiki/Merge_and_aggregate_datasets#Datalog][Datalog]],  [[https://rosettacode.org/wiki/Merge_and_aggregate_datasets#Prolog][Prolog]], [[https://rosettacode.org/wiki/Merge_and_aggregate_datasets#SAS][SAS]] and [[https://rosettacode.org/wiki/Merge_and_aggregate_datasets#TutorialD][Tutorial D]]  implementations.
+
+
+* Mercury
+
+** Sort dates by timestamps
+
+The following implementation sorts the user-defined dates using timestamps:
+
+#+BEGIN_SRC prolog :noweb yes :tangle rosetta_1.m :exports code :eval no
+:- module rosetta_1.
+
+:- interface.
+:- import_module io.
+:- pred main(io::di, io::uo) is det.
+
+:- implementation.
+:- import_module list, int, float, time, string, maybe, solutions.
+
+:- pred patient(int::out, string::out) is multi.
+patient(1001, "Hopper").
+patient(4004, "Wirth").
+patient(3003, "Kemeny").
+patient(2002, "Gosling").
+patient(5005, "Kurtz").
+
+:- func nan = float.
+nan = det_to_float("NaN").
+
+:- type maybe_date ---> date(year::int, month::int, day::int); no.
+
+:- pred visit(int::out, maybe_date::out, float::out) is multi.
+visit(2002, date(2020,09,10), 6.8).
+visit(1001, date(2020,09,17), 5.5).
+visit(4004, date(2020,09,24), 8.4).
+visit(2002, date(2020,10,08), nan).
+visit(1001, no, 6.6).
+visit(3003, date(2020,11,12), nan).
+visit(4004, date(2020,11,05), 7.0).
+visit(1001, date(2020,11,19), 5.3).
+
+%% Utilities
+:- pred bag_count(pred(T)::(pred(out) is nondet), int::out) is det.
+:- pred bag_sum(pred(float)::(pred(out) is nondet), float::out) is det.
+:- pred bag_avg(pred(float)::(pred(out) is nondet), float::out) is det.
+bag_count(Predicate, Count) :-
+    promise_equivalent_solutions[Count] (
+	unsorted_aggregate(Predicate,
+			   (pred(_X::in,Y::in,Z::out) is det :- Z is Y+1),
+			   0, Count)).
+bag_sum(Predicate, Sum) :-
+    promise_equivalent_solutions[Sum] (
+	unsorted_aggregate(Predicate,
+			   (pred(X::in,Y::in,Z::out) is det :- Z is X+Y),
+			   0.0, Sum)).
+bag_avg(Predicate, Avg) :-
+    bag_count(Predicate, N),
+    bag_sum(Predicate, Sum),
+    (if N = 0 then Avg = nan else Avg is Sum/float(N)).
+
+:- func to_time(int,int,int) = time_t.
+to_time(Year,Month,Day) = Time :-
+    Tm = tm(Year - 1900, Month - 1, Day, 23, 59, 59, -1, -1, no),
+    Time = mktime(Tm).
+
+:- pred max_date(maybe_date::in, maybe_date::in, maybe_date::out) is det.
+:- pred bag_max_date(pred(maybe_date)::(pred(out) is nondet), maybe_date::out) is det.
+%% Sort dates using to_time() and difftime()
+max_date(date(Y1,M1,D1), date(Y2,M2,D2), Date) :-
+    promise_equivalent_solutions [Date]
+    (Time1 = to_time(Y1,M1,D1),
+     Time2 = to_time(Y2,M2,D2),
+     (if difftime(Time1,Time2) > 0.0 then Date=date(Y1,M1,D1) else Date=date(Y2,M2,D2))).
+max_date(no, date(Y,M,D), date(Y,M,D)).
+max_date(date(Y,M,D), no, date(Y,M,D)).
+max_date(no, no, no).
+bag_max_date(Predicate, Max) :-
+    promise_equivalent_solutions[Max]
+    (unsorted_aggregate(Predicate, max_date, no, Max)).
+
+main(!IO) :-
+    io.write_string("{Id, Lastname, SumScores, AvgScores, MaxDate}:\n", !IO),
+    solutions((pred({Id,Lastname,Sum,Avg,MaxDate}::out) is nondet :-
+	           patient(Id,Lastname),
+	           Scores = (pred(Score::out) is nondet :- visit(Id,_,Score), \+is_nan(Score)),
+	           bag_avg(Scores, Avg),
+	  	   bag_sum(Scores, Sum),
+	           Dates = (pred(Date::out) is nondet :- visit(Id,Date,_)),
+	           bag_max_date(Dates, MaxDate)),
+	      Solutions),
+    foldl(io.write_line, Solutions, !IO).
+#+END_SRC
+
+We can run this code using:
+
+#+BEGIN_SRC sh :results output :exports both
+mmc --make rosetta_1 && ./rosetta_1
+#+END_SRC
+
+#+RESULTS:
+: {Id, Lastname, SumScores, AvgScores, MaxDate}:
+: {1001, "Hopper", 17.4, 5.8, date(2020, 11, 19)}
+: {2002, "Gosling", 6.8, 6.8, date(2020, 10, 8)}
+: {3003, "Kemeny", 0.0, nan, date(2020, 11, 12)}
+: {4004, "Wirth", 15.4, 7.7, date(2020, 11, 5)}
+: {5005, "Kurtz", 0.0, nan, no}
+
+
+** Sort dates using =compare=
+
+#+BEGIN_SRC prolog :noweb yes :tangle rosetta_2.m :exports code :eval no
+:- module rosetta_2.
+
+:- interface.
+:- import_module io.
+:- pred main(io::di, io::uo) is det.
+
+:- implementation.
+:- import_module list, int, float, string, maybe, solutions.
+
+:- pred patient(int::out, string::out) is multi.
+patient(1001, "Hopper").
+patient(4004, "Wirth").
+patient(3003, "Kemeny").
+patient(2002, "Gosling").
+patient(5005, "Kurtz").
+
+:- func nan = float.
+nan = det_to_float("NaN").
+
+:- type maybe_date ---> date(year::int, month::int, day::int); no.
+
+:- pred visit(int::out, maybe_date::out, float::out) is multi.
+visit(2002, date(2020,09,10), 6.8).
+visit(1001, date(2020,09,17), 5.5).
+visit(4004, date(2020,09,24), 8.4).
+visit(2002, date(2020,10,08), nan).
+visit(1001, no, 6.6).
+visit(3003, date(2020,11,12), nan).
+visit(4004, date(2020,11,05), 7.0).
+visit(1001, date(2020,11,19), 5.3).
+
+%% Utilities
+:- pred bag_count(pred(T)::(pred(out) is nondet), int::out) is det.
+:- pred bag_sum(pred(float)::(pred(out) is nondet), float::out) is det.
+:- pred bag_avg(pred(float)::(pred(out) is nondet), float::out) is det.
+bag_count(Predicate, Count) :-
+    promise_equivalent_solutions[Count] (
+	unsorted_aggregate(Predicate,
+			   (pred(_X::in,Y::in,Z::out) is det :- Z is Y+1),
+			   0, Count)).
+bag_sum(Predicate, Sum) :-
+    promise_equivalent_solutions[Sum] (
+	unsorted_aggregate(Predicate,
+			   (pred(X::in,Y::in,Z::out) is det :- Z is X+Y),
+			   0.0, Sum)).
+bag_avg(Predicate, Avg) :-
+    bag_count(Predicate, N),
+    bag_sum(Predicate, Sum),
+    (if N = 0 then Avg = nan else Avg is Sum/float(N)).
+
+:- pred max_date(maybe_date::in, maybe_date::in, maybe_date::out) is det.
+:- pred bag_max_date(pred(maybe_date)::(pred(out) is nondet), maybe_date::out) is det.
+max_date(date(Y1,M1,D1), date(Y2,M2,D2), Date) :-
+    compare(R, date(Y1,M1,D1), date(Y2,M2,D2)),
+    (if R = (>) then Date = date(Y1,M1,D1) else Date = date(Y2,M2,D2)).
+max_date(no, date(Y,M,D), date(Y,M,D)).
+max_date(date(Y,M,D), no, date(Y,M,D)).
+max_date(no, no, no).
+bag_max_date(Predicate, Max) :-
+    promise_equivalent_solutions[Max]
+    (unsorted_aggregate(Predicate, max_date, no, Max)).
+
+main(!IO) :-
+    io.write_string("{Id, Lastname, SumScores, AvgScores, MaxDate}:\n", !IO),
+    solutions((pred({Id,Lastname,Sum,Avg,MaxDate}::out) is nondet :-
+	           patient(Id,Lastname),
+	           Scores = (pred(Score::out) is nondet :- visit(Id,_,Score), \+is_nan(Score)),
+	           bag_avg(Scores, Avg),
+	  	   bag_sum(Scores, Sum),
+	           Dates = (pred(Date::out) is nondet :- visit(Id,Date,_)),
+	           bag_max_date(Dates, MaxDate)),
+	      Solutions),
+    foldl(io.write_line, Solutions, !IO).
+#+END_SRC
+
+We can run this code using:
+
+#+BEGIN_SRC sh :results output :exports both
+mmc --make rosetta_2 && ./rosetta_2
+#+END_SRC
+
+#+RESULTS:
+: {Id, Lastname, SumScores, AvgScores, MaxDate}:
+: {1001, "Hopper", 17.4, 5.8, date(2020, 11, 19)}
+: {2002, "Gosling", 6.8, 6.8, date(2020, 10, 8)}
+: {3003, "Kemeny", 0.0, nan, date(2020, 11, 12)}
+: {4004, "Wirth", 15.4, 7.7, date(2020, 11, 5)}
+: {5005, "Kurtz", 0.0, nan, no}
