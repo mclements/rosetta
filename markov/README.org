@@ -381,7 +381,7 @@ main(!IO) :-
 
 When we run this code:
 
-#+BEGIN_SRC sh :results raw :exports code
+#+BEGIN_SRC sh :results raw :exports both
 mmc --make --use-minimal-model-stack-copy markov_2 && ./markov_2
 #+END_SRC
 
