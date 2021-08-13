@@ -381,11 +381,12 @@ main(!IO) :-
 
 When we run this code:
 
-#+BEGIN_SRC sh :results raw :exports both
+#+BEGIN_SRC sh :results output :exports both :eval no
 mmc --make --use-minimal-model-stack-copy markov_2 && ./markov_2
 #+END_SRC
 
 #+RESULTS:
+#+begin_example
 {Time,Ntransitions,Ptotal}:
 {0, 4, 1.0}
 {1, 4, 1.0}
@@ -406,7 +407,7 @@ mmc --make --use-minimal-model-stack-copy markov_2 && ./markov_2
 {4, b, 2, 0.282470703125}
 {5, a, 2, 0.698455810546875}
 {5, b, 2, 0.301544189453125}
-
+#+end_example
 
 *** Implementation using mutually recursive predicates
 
